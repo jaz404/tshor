@@ -5,7 +5,7 @@
 #include "BoardConfig.h"
 
 AdafruitMotor haptic;
-
+// todo for me 
 // check 'feedback' is it getting updated as expected? same rater as damping period? 
 // check if using torque mode directly better than is being done right now
 
@@ -14,9 +14,7 @@ AdafruitMotor haptic;
 
 constexpr float POSITION_GAIN_A_PER_DEG = 0.25f;
 float targetPositionDeg = 0.0f;
-
 bool dampingEnabled = false;
-
 constexpr uint32_t DAMPING_PERIOD_US  = 1000;           // 1/1000us = 1 KHz freq
 constexpr float DAMPING_GAIN = 2.00f;
 constexpr float STATIC_RESISTANCE_A = 0.5f;
@@ -29,11 +27,12 @@ uint32_t lastDampingCommandUs = 0;
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can1;
 // unsigned long lastCanSend = 0;
 // const int canInterval = 10; 
-
 // Main network
 FlexCAN_T4FD<CAN3,  RX_SIZE_256, TX_SIZE_16> canFD;
 unsigned long lastCanFDSend = 0;
 const int canFDInterval = 10; 
+constexpr uint32_t CANFD_STATE_ID           = 0x11;                     // Controller -> PC
+constexpr uint32_t CANFD_CURRENT_COMMAND_ID = 0x12;                     // PC -> Controller
 
 OT2206CAN<decltype(Can1)>::Config motorConfig{
     .motorId = 1,
@@ -45,8 +44,6 @@ OT2206CAN<decltype(Can1)>::Config motorConfig{
 
 OT2206CAN<decltype(Can1)> motor(Can1, motorConfig);
 OT2206CAN<decltype(Can1)>::Feedback feedback;
-
-
 
 static void printMenu() {
     Serial.println("\nOT2206 classical CAN test");
@@ -155,8 +152,8 @@ void loop()
         Serial.write(c);
         }
     #else
+        // Motor CAN
         Can1.events();
-
         /*
         * Read all CAN responses.
         *
@@ -263,246 +260,244 @@ void loop()
                 }
             }
         }
-        /*
-        * Do not return when Serial is empty because the damping controller
-        * must continue running.
-        */
-        if (!Serial.available())
-        {
-            return;
-        }
-        const char cmd = static_cast<char>(Serial.read());
-        switch (cmd)
-        {
-            case '1':
-                dampingEnabled = false;
 
-                Serial.println(
-                    motor.setAddressMode(
-                        decltype(motor)::AddressMode::NormalAbsolute
-                    )
-                        ? "Normal absolute mode requested."
-                        : "CAN write failed."
-                );
-                break;
+        // #endif 
+        #ifdef TESTING
+            if (Serial.available()) {}
 
-            case '2':
-                dampingEnabled = false;
-
-                Serial.println(
-                    motor.setAddressMode(
-                        decltype(motor)::AddressMode::ExtendedIncremental
-                    )
-                        ? "Extended incremental mode requested."
-                        : "CAN write failed."
-                );
-                break;
-
-            case 'p':
+            const char cmd = static_cast<char>(Serial.read());
+            switch (cmd)
             {
-                dampingEnabled = false;
-
-                bool ok = motor.selectPositionSpeedTorqueMode();
-                delay(5);
-
-                ok &= motor.commandPosition(
-                    targetPositionDeg, // degrees
-                    10.0f, // maximum rad/s
-                    0.25f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
-                    1,   // Kp
-                    0     // Kd
-                );
-
-
-                Serial.println(
-                    ok
-                        ? "Position command loaded. Press r to start."
-                        : "CAN write failed."
-                );
-                break;
-            }
-             case 'o':
-            {
-                dampingEnabled = false;
-
-                bool ok = motor.selectPositionSpeedTorqueMode();
-                delay(5);
-
-                ok &= motor.commandPosition(
-                    targetPositionDeg, // degrees
-                    10.0f, // maximum rad/s
-                    0.20f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
-                    1,   // Kp
-                    0     // Kd
-                );
-
-
-                Serial.println(
-                    ok
-                        ? "Position command loaded. Press r to start."
-                        : "CAN write failed."
-                );
-                break;
-            }
-
-            case 's':
-            {
-                dampingEnabled = false;
-
-                bool ok = motor.selectSpeedTorqueMode();
-                delay(5);
-
-                ok &= motor.commandSpeed(
-                    100.0f, // rad/s
-                    0.5f    // current limit A
-                );
-
-                Serial.println(
-                    ok
-                        ? "Speed command loaded. Press r to start."
-                        : "CAN write failed."
-                );
-                break;
-            }
-
-            case 't':
-            {
-                dampingEnabled = false;
-
-                bool ok = motor.selectTorqueMode();
-                delay(5);
-
-                ok &= motor.commandTorque(1.00f);
-
-                Serial.println(
-                    ok
-                        ? "Torque command loaded. Press r to start."
-                        : "CAN write failed."
-                );
-                break;
-            }
-
-            case 'd':
-            {
-                /*
-                * Start with zero current so the motor does not suddenly move.
-                */
-                dampingEnabled = false;
-
-                bool ok = motor.stopFree();
-                delay(10);
-
-                ok &= motor.selectTorqueMode();
-                delay(10);
-
-                ok &= motor.commandTorque(0.0f);
-                delay(10);  
-
-                // need to set speed pos torque before starting motor!!
-                ok &= motor.start();
-                delay(10);
-
-                if (ok)
-                {
-                    feedback.valid = false;
-                    // targetPositionDeg = feedback.positionDeg;
-                    dampingEnabled = true;
-                    lastDampingCommandUs = micros();
+                case '1':
+                    dampingEnabled = false;
 
                     Serial.println(
-                        "Damping enabled. Rotate the motor by hand."
+                        motor.setAddressMode(
+                            decltype(motor)::AddressMode::NormalAbsolute
+                        )
+                            ? "Normal absolute mode requested."
+                            : "CAN write failed."
                     );
+                    break;
+
+                case '2':
+                    dampingEnabled = false;
+
                     Serial.println(
-                        "Press x to stop and free the motor."
+                        motor.setAddressMode(
+                            decltype(motor)::AddressMode::ExtendedIncremental
+                        )
+                            ? "Extended incremental mode requested."
+                            : "CAN write failed."
                     );
-                }
-                else
+                    break;
+
+                case 'p':
                 {
-                    motor.stopFree();
-                    Serial.println("Failed to enable damping mode.");
+                    dampingEnabled = false;
+
+                    bool ok = motor.selectPositionSpeedTorqueMode();
+                    delay(5);
+
+                    ok &= motor.commandPosition(
+                        targetPositionDeg, // degrees
+                        10.0f, // maximum rad/s
+                        0.25f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
+                        1,   // Kp
+                        0     // Kd
+                    );
+
+
+                    Serial.println(
+                        ok
+                            ? "Position command loaded. Press r to start."
+                            : "CAN write failed."
+                    );
+                    break;
+                }
+                case 'o':
+                {
+                    dampingEnabled = false;
+
+                    bool ok = motor.selectPositionSpeedTorqueMode();
+                    delay(5);
+
+                    ok &= motor.commandPosition(
+                        targetPositionDeg, // degrees
+                        10.0f, // maximum rad/s
+                        0.20f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
+                        1,   // Kp
+                        0     // Kd
+                    );
+
+
+                    Serial.println(
+                        ok
+                            ? "Position command loaded. Press r to start."
+                            : "CAN write failed."
+                    );
+                    break;
                 }
 
-                break;
+                case 's':
+                {
+                    dampingEnabled = false;
+
+                    bool ok = motor.selectSpeedTorqueMode();
+                    delay(5);
+
+                    ok &= motor.commandSpeed(
+                        100.0f, // rad/s
+                        0.5f    // current limit A
+                    );
+
+                    Serial.println(
+                        ok
+                            ? "Speed command loaded. Press r to start."
+                            : "CAN write failed."
+                    );
+                    break;
+                }
+
+                case 't':
+                {
+                    dampingEnabled = false;
+
+                    bool ok = motor.selectTorqueMode();
+                    delay(5);
+
+                    ok &= motor.commandTorque(1.00f);
+
+                    Serial.println(
+                        ok
+                            ? "Torque command loaded. Press r to start."
+                            : "CAN write failed."
+                    );
+                    break;
+                }
+
+                case 'd':
+                {
+                    /*
+                    * Start with zero current so the motor does not suddenly move.
+                    */
+                    dampingEnabled = false;
+
+                    bool ok = motor.stopFree();
+                    delay(10);
+
+                    ok &= motor.selectTorqueMode();
+                    delay(10);
+
+                    ok &= motor.commandTorque(0.0f);
+                    delay(10);  
+
+                    // need to set speed pos torque before starting motor!!
+                    ok &= motor.start();
+                    delay(10);
+
+                    if (ok)
+                    {
+                        feedback.valid = false;
+                        // targetPositionDeg = feedback.positionDeg;
+                        dampingEnabled = true;
+                        lastDampingCommandUs = micros();
+
+                        Serial.println(
+                            "Damping enabled. Rotate the motor by hand."
+                        );
+                        Serial.println(
+                            "Press x to stop and free the motor."
+                        );
+                    }
+                    else
+                    {
+                        motor.stopFree();
+                        Serial.println("Failed to enable damping mode.");
+                    }
+
+                    break;
+                }
+
+                case 'r':
+                    Serial.println(
+                        motor.start()
+                            ? "Start sent."
+                            : "Start blocked: send a setpoint first or CAN write failed."
+                    );
+                    break;
+
+                case 'x':
+                    dampingEnabled = false;
+
+                    // Command zero current before freeing the motor.
+                    motor.commandTorque(0.0f);
+                    delay(5);
+
+                    Serial.println(
+                        motor.stopFree()
+                            ? "Damping disabled; stop/free sent."
+                            : "CAN write failed."
+                    );
+                    break;
+
+                case 'z':
+                    targetPositionDeg = feedback.positionDeg;
+
+                    dampingEnabled = false;
+
+                    Serial.println(
+                        motor.setTemporaryMechanicalZero()
+                            ? "Temporary zero sent."
+                            : "CAN write failed."
+                    );
+                    break;
+
+                case 'i':
+                {
+                    dampingEnabled = false;
+
+                    bool ok = true;
+
+                    ok &= motor.setPIMultiplier(
+                        decltype(motor)::PIParameter::SpeedKp,
+                        1.0f
+                    );
+
+                    ok &= motor.setPIMultiplier(
+                        decltype(motor)::PIParameter::SpeedKi,
+                        1.0f
+                    );
+
+                    ok &= motor.setPIMultiplier(
+                        decltype(motor)::PIParameter::CurrentKp,
+                        1.0f
+                    );
+
+                    ok &= motor.setPIMultiplier(
+                        decltype(motor)::PIParameter::CurrentKi,
+                        1.0f
+                    );
+
+                    Serial.println(
+                        ok
+                            ? "PI multipliers sent."
+                            : "At least one CAN write failed."
+                    );
+                    break;
+                }
+
+                case 'f':
+                    printFeedback(feedback);
+                    break;
+
+                case '?':
+                    printMenu();
+                    break;
+
+                default:
+                    break;
             }
-
-            case 'r':
-                Serial.println(
-                    motor.start()
-                        ? "Start sent."
-                        : "Start blocked: send a setpoint first or CAN write failed."
-                );
-                break;
-
-            case 'x':
-                dampingEnabled = false;
-
-                // Command zero current before freeing the motor.
-                motor.commandTorque(0.0f);
-                delay(5);
-
-                Serial.println(
-                    motor.stopFree()
-                        ? "Damping disabled; stop/free sent."
-                        : "CAN write failed."
-                );
-                break;
-
-            case 'z':
-                targetPositionDeg = feedback.positionDeg;
-
-                dampingEnabled = false;
-
-                Serial.println(
-                    motor.setTemporaryMechanicalZero()
-                        ? "Temporary zero sent."
-                        : "CAN write failed."
-                );
-                break;
-
-            case 'i':
-            {
-                dampingEnabled = false;
-
-                bool ok = true;
-
-                ok &= motor.setPIMultiplier(
-                    decltype(motor)::PIParameter::SpeedKp,
-                    1.0f
-                );
-
-                ok &= motor.setPIMultiplier(
-                    decltype(motor)::PIParameter::SpeedKi,
-                    1.0f
-                );
-
-                ok &= motor.setPIMultiplier(
-                    decltype(motor)::PIParameter::CurrentKp,
-                    1.0f
-                );
-
-                ok &= motor.setPIMultiplier(
-                    decltype(motor)::PIParameter::CurrentKi,
-                    1.0f
-                );
-
-                Serial.println(
-                    ok
-                        ? "PI multipliers sent."
-                        : "At least one CAN write failed."
-                );
-                break;
-            }
-
-            case 'f':
-                printFeedback(feedback);
-                break;
-
-            case '?':
-                printMenu();
-                break;
-
-            default:
-                break;
-        }
+            #endif
     #endif
 }
