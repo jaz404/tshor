@@ -1,6 +1,10 @@
 #include <Arduino.h>
 #include <FlexCAN_T4.h>
 #include "OT2206.h"
+#include "adafruitmotor.h"
+#include "BoardConfig.h"
+
+AdafruitMotor haptic;
 
 // check 'feedback' is it getting updated as expected? same rater as damping period? 
 // check if using torque mode directly better than is being done right now
@@ -20,18 +24,29 @@ constexpr float MAX_DAMPING_CURRENT_A = 1.5f;
 constexpr float VELOCITY_DEADBAND_RAD_S = 0.05f;
 uint32_t lastDampingCommandUs = 0;
 
+// CANs
+// Motor network
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can1;
+// unsigned long lastCanSend = 0;
+// const int canInterval = 10; 
+
+// Main network
+FlexCAN_T4FD<CAN3,  RX_SIZE_256, TX_SIZE_16> canFD;
+unsigned long lastCanFDSend = 0;
+const int canFDInterval = 10; 
 
 OT2206CAN<decltype(Can1)>::Config motorConfig{
     .motorId = 1,
     .hostId = 100,
-    .pmaxTurns = 1.0f,
+    .pmaxTurns = 1.0f,            // TODO: increase this in config
     .speedFullScaleRadS = 200.0f, // Replace with actual OT2206 full scale.
-    .currentFullScaleA = 4.0f     // Replace with actual OT2206 full scale.
+    .currentFullScaleA = 4.0f   
 };
 
 OT2206CAN<decltype(Can1)> motor(Can1, motorConfig);
 OT2206CAN<decltype(Can1)>::Feedback feedback;
+
+
 
 static void printMenu() {
     Serial.println("\nOT2206 classical CAN test");
@@ -80,6 +95,7 @@ void setup() {
         Serial.begin(115200);
         while (!Serial && millis() < 3000) {}
 
+        // Setup motor CAN
         Can1.begin();
         Can1.setBaudRate(1000000); // Manual specifies 1 Mbit/s classical CAN.
         Can1.setMaxMB(16);
@@ -90,7 +106,35 @@ void setup() {
         Can1.setFIFOFilter(0, motorConfig.hostId, STD);         // only accept from host id 1
 
         delay(100);
-        Serial.println("CAN initialized at 1 Mbit/s.");
+        Serial.println("OT2206 CAN initialized at 1 Mbit/s.");
+
+        // canFD setup
+        canFD.begin();
+
+        CANFD_timings_t config;
+        config.clock = CLK_60MHz;
+        config.baudrate = 1000000;    // 1Mbps Nominal speed
+        config.baudrateFD = 5000000;  // 5Mbps Data speed
+        config.propdelay = 190;
+        config.bus_length = 1;
+        config.sample = 70;
+        
+        canFD.setBaudRate(config);
+
+        delay(100);
+        Serial.println("CAN FD initialized at 1 Mbit/s.");
+
+        if (!haptic.begin())
+        {
+            Serial.println("DRV2605L not detected.");
+            while (true)
+            {
+                delay(100);
+            }
+        }
+
+        Serial.println("DRV2605L Haptics ready.");
+
         printMenu();
     
     #endif
@@ -264,7 +308,7 @@ void loop()
                 ok &= motor.commandPosition(
                     targetPositionDeg, // degrees
                     10.0f, // maximum rad/s
-                    0.50f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
+                    0.25f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
                     1,   // Kp
                     0     // Kd
                 );
