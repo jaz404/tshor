@@ -3,48 +3,64 @@
 #include "OT2206.h"
 #include "adafruitmotor.h"
 #include "BoardConfig.h"
+#include "MainCanFD.h"
 
 AdafruitMotor haptic;
-// todo for me 
-// check 'feedback' is it getting updated as expected? same rater as damping period? 
-// check if using torque mode directly better than is being done right now
 
-// with t mode the movement is much more stronger and smoother? 
-// also the measured A is much lower than cmd A
+// =========================================================
+// TRIGGER CONTROL PARAMETERS
+// =========================================================
 
+// Existing/local damping controller parameters.
 constexpr float POSITION_GAIN_A_PER_DEG = 0.25f;
 float targetPositionDeg = 0.0f;
-bool dampingEnabled = false;
-constexpr uint32_t DAMPING_PERIOD_US  = 1000;           // 1/1000us = 1 KHz freq
+
+constexpr uint32_t CONTROL_PERIOD_US = 1000; // 1 kHz local motor-current loop
 constexpr float DAMPING_GAIN = 2.00f;
 constexpr float STATIC_RESISTANCE_A = 0.5f;
 constexpr float MAX_DAMPING_CURRENT_A = 1.5f;
 constexpr float VELOCITY_DEADBAND_RAD_S = 0.05f;
-uint32_t lastDampingCommandUs = 0;
 
-// CANs
-// Motor network
+// P-P controller gain.
+// Input error is normalized (0.0 to 1.0), output is motor current in A.
+constexpr float PP_GAIN_A = 1.0f;
+constexpr float PP_MAX_CURRENT_A = 1.5f;
+
+// TODO: Measure and replace with the actual trigger travel.
+// These limits are used only to convert OT2206 degrees into 0...10000.
+constexpr float TRIGGER_OPEN_DEG = 0.0f;
+constexpr float TRIGGER_CLOSED_DEG = 30.0f;
+
+bool dampingEnabled = false;
+bool ppControlEnabled = false;
+uint32_t lastControlCommandUs = 0;
+
+// TODO: Replace/update with analog read 14 and 15
+uint16_t thumbX = 0;
+uint16_t thumbY = 0;
+
+// =========================================================
+// MOTOR NETWORK -- CLASSICAL CAN2
+// =========================================================
+
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can1;
-// unsigned long lastCanSend = 0;
-// const int canInterval = 10; 
-// Main network
-FlexCAN_T4FD<CAN3,  RX_SIZE_256, TX_SIZE_16> canFD;
-unsigned long lastCanFDSend = 0;
-const int canFDInterval = 10; 
-constexpr uint32_t CANFD_STATE_ID           = 0x11;                     // Controller -> PC
-constexpr uint32_t CANFD_CURRENT_COMMAND_ID = 0x12;                     // PC -> Controller
 
 OT2206CAN<decltype(Can1)>::Config motorConfig{
     .motorId = 1,
     .hostId = 100,
-    .pmaxTurns = 1.0f,            // TODO: increase this in config
-    .speedFullScaleRadS = 200.0f, // Replace with actual OT2206 full scale.
-    .currentFullScaleA = 4.0f   
+    .pmaxTurns = 1.0f,            // TODO: increase this in motor config if needed
+    .speedFullScaleRadS = 200.0f,
+    .currentFullScaleA = 4.0f
 };
 
 OT2206CAN<decltype(Can1)> motor(Can1, motorConfig);
 OT2206CAN<decltype(Can1)>::Feedback feedback;
 
+// =========================================================
+// HELPERS
+// =========================================================
+
+#ifdef TESTING
 static void printMenu() {
     Serial.println("\nOT2206 classical CAN test");
     Serial.println("1: normal/absolute CAN control mode");
@@ -59,7 +75,7 @@ static void printMenu() {
     Serial.println("f: print latest feedback");
     Serial.println("?: menu");
 }
-
+#endif
 static void printFeedback(const decltype(feedback) &f) {
     if (!f.valid) {
         Serial.println("No valid feedback received yet.");
@@ -77,6 +93,203 @@ static void printFeedback(const decltype(feedback) &f) {
     }
     Serial.println();
 }
+
+// Convert local OT2206 trigger angle to a common 0...10000 position.
+static uint16_t getTriggerPositionNormalized()
+{
+    if (!feedback.valid)
+    {
+        return 0;
+    }
+
+    const float denominator = TRIGGER_CLOSED_DEG - TRIGGER_OPEN_DEG;
+
+    if (fabsf(denominator) < 1e-6f)
+    {
+        return 0;
+    }
+
+    float normalized =
+        (feedback.positionDeg - TRIGGER_OPEN_DEG) / denominator;
+
+    normalized = constrain(normalized, 0.0f, 1.0f);
+
+    return static_cast<uint16_t>(normalized * 10000.0f);
+}
+
+// =========================================================
+// P-P CONTROL
+// =========================================================
+
+// Position-mode parameters used for bilateral P-P control.
+// The gripper position received over CAN-FD becomes the desired
+// trigger position. The current argument limits how strongly the
+// trigger motor is allowed to pull toward that position.
+constexpr float PP_MAX_SPEED_RAD_S = 10.0f;
+constexpr float PP_KP = 1.0f;
+constexpr float PP_KD = 0.0f;
+
+// Current limit used by OT2206 position mode for the first P-P version.
+// Later this can be changed using gripper force/contact/error to make
+// the trigger feel stiffer when the gripper interacts with an object.
+constexpr float PP_CURRENT_LIMIT_A = 0.25f;
+
+struct PPCommand
+{
+    float targetPositionDeg = 0.0f;
+    float currentLimitA = PP_CURRENT_LIMIT_A;
+    float positionError = 0.0f;
+};
+
+static PPCommand calculatePPControl(
+    uint16_t triggerPos,
+    uint16_t gripperPos
+)
+{
+    PPCommand command;
+
+    const float triggerNormalized =
+        static_cast<float>(triggerPos) / 10000.0f;
+
+    const float gripperNormalized =
+        static_cast<float>(gripperPos) / 10000.0f;
+
+    // Positive error means the trigger has been squeezed farther closed
+    // than the actual gripper has moved.
+    command.positionError =
+        triggerNormalized - gripperNormalized;
+
+    // Map actual gripper position back into the trigger's mechanical range.
+    // This is the key P-P coupling: the trigger motor is commanded toward
+    // the position corresponding to the ACTUAL gripper position.
+    command.targetPositionDeg =
+        TRIGGER_OPEN_DEG +
+        gripperNormalized * (TRIGGER_CLOSED_DEG - TRIGGER_OPEN_DEG);
+
+    // For now use a fixed current limit. The OT2206 position controller
+    // creates the restoring action from position error. Later we can make
+    // this current limit depend on gripper force/contact to vary stiffness.
+    command.currentLimitA = PP_CURRENT_LIMIT_A;
+
+    return command;
+}
+
+static void runPPControl()
+{
+    if (!ppControlEnabled)
+    {
+        return;
+    }
+
+    const uint32_t nowUs = micros();
+
+    if (nowUs - lastControlCommandUs < CONTROL_PERIOD_US)
+    {
+        return;
+    }
+
+    lastControlCommandUs += CONTROL_PERIOD_US;
+
+    if (!feedback.valid)
+    {
+        return;
+    }
+
+    const MainCanFD::GripperState& gripper =
+        MainCanFD::getGripperState();
+
+    // Do not command a P-P target from stale/missing gripper state.
+    if (!gripper.valid)
+    {
+        return;
+    }
+
+    const uint16_t triggerPos =
+        getTriggerPositionNormalized();
+
+    const PPCommand pp =
+        calculatePPControl(triggerPos, gripper.position);
+
+    // IMPORTANT:
+    // OT2206 is still commanded over classical CAN2.
+    // We use position/speed/torque mode here, NOT direct torque mode.
+    //
+    // target position = actual gripper position mapped to trigger degrees
+    // max speed       = PP_MAX_SPEED_RAD_S
+    // current limit   = fixed for now; later driven by force/contact
+    // Kp / Kd         = OT2206 position-control gains
+    const bool ok = motor.commandPosition(
+        pp.targetPositionDeg,
+        PP_MAX_SPEED_RAD_S,
+        pp.currentLimitA,
+        PP_KP,
+        PP_KD
+    );
+
+    static uint32_t lastPrintMs = 0;
+    if (millis() - lastPrintMs >= 200)
+    {
+        lastPrintMs = millis();
+
+        const float triggerNorm =
+            static_cast<float>(triggerPos) / 10000.0f;
+
+        const float gripperNorm =
+            static_cast<float>(gripper.position) / 10000.0f;
+
+        Serial.printf(
+            "PP: trigger=%.3f gripper=%.3f err=%+.3f target=%+.2f deg Imax=%.3f A measured=%+.3f A TX=%s\n",
+            triggerNorm,
+            gripperNorm,
+            pp.positionError,
+            pp.targetPositionDeg,
+            pp.currentLimitA,
+            feedback.currentA,
+            ok ? "OK" : "FAILED"
+        );
+    }
+}
+
+    // Start OT2206 in position/speed/torque mode for bilateral P-P control.
+    static bool startPPPositionControl()
+    {
+        dampingEnabled = false;
+        ppControlEnabled = false;
+
+        bool ok = motor.stopFree();
+        delay(10);
+
+        ok &= motor.selectPositionSpeedTorqueMode();
+        delay(10);
+
+        // Load a safe initial position command before starting.
+        // Use the current trigger position so enabling P-P does not cause a jump.
+        const float initialPositionDeg =
+            feedback.valid ? feedback.positionDeg : targetPositionDeg;
+
+        ok &= motor.commandPosition(
+            initialPositionDeg,
+            PP_MAX_SPEED_RAD_S,
+            PP_CURRENT_LIMIT_A,
+            PP_KP,
+            PP_KD
+        );
+        delay(10);
+
+        ok &= motor.start();
+        delay(10);
+
+        if (ok)
+        {
+            lastControlCommandUs = micros();
+        }
+        else
+        {
+            motor.stopFree();
+        }
+
+        return ok;
+    }
 
 void setup() {
 
@@ -105,22 +318,6 @@ void setup() {
         delay(100);
         Serial.println("OT2206 CAN initialized at 1 Mbit/s.");
 
-        // canFD setup
-        canFD.begin();
-
-        CANFD_timings_t config;
-        config.clock = CLK_60MHz;
-        config.baudrate = 1000000;    // 1Mbps Nominal speed
-        config.baudrateFD = 5000000;  // 5Mbps Data speed
-        config.propdelay = 190;
-        config.bus_length = 1;
-        config.sample = 70;
-        
-        canFD.setBaudRate(config);
-
-        delay(100);
-        Serial.println("CAN FD initialized at 1 Mbit/s.");
-
         if (!haptic.begin())
         {
             Serial.println("DRV2605L not detected.");
@@ -132,7 +329,9 @@ void setup() {
 
         Serial.println("DRV2605L Haptics ready.");
 
+        #ifdef TESTING
         printMenu();
+        #endif
     
     #endif
 }
@@ -190,80 +389,28 @@ void loop()
             }
         }
 
-        /*
-        * Trigger controller:
-        *
-        * - Low-gain position term returns the trigger toward its starting position.
-        * - Damping/static resistance is applied only for positive velocity.
-        * - The current limit keeps the trigger manually movable.
-        */
-        if (dampingEnabled)
-        {
-            const uint32_t nowUs = micros();
+        // =====================================================
+        // 2. MAIN NETWORK -- CAN3 FD
+        // =====================================================
 
-            if (nowUs - lastDampingCommandUs >= DAMPING_PERIOD_US)
-            {
-                lastDampingCommandUs += DAMPING_PERIOD_US;
+        // Read latest gripper position (ID 0x12) and update timeout state.
+        MainCanFD::update();
 
-                float commandedCurrentA = 0.0f;
-                float positionErrorDeg = 0.0f;
+        // Send trigger position + thumb X/Y to main network (ID 0x11).
+        // sendTriggerState() internally limits this to 100 Hz.
+        MainCanFD::sendTriggerState(
+            getTriggerPositionNormalized(),
+            thumbX,
+            thumbY
+        );
 
-                if (feedback.valid)
-                {
-                    positionErrorDeg =
-                        targetPositionDeg - feedback.positionDeg;
+        // =====================================================
+        // 3. LOCAL TRIGGER MOTOR CONTROL
+        // =====================================================
+        runPPControl();
 
-                    // New position-return term
-                    commandedCurrentA =
-                        POSITION_GAIN_A_PER_DEG * positionErrorDeg;
-
-                    // Existing one-direction damping
-                    if (feedback.speedRadS > VELOCITY_DEADBAND_RAD_S)
-                    {
-                        commandedCurrentA +=
-                            -STATIC_RESISTANCE_A
-                            -DAMPING_GAIN * feedback.speedRadS;
-                    }
-
-                    commandedCurrentA = constrain(
-                        commandedCurrentA,
-                        -MAX_DAMPING_CURRENT_A,
-                        MAX_DAMPING_CURRENT_A
-                    );
-                }
-
-                const bool ok =
-                    motor.commandTorque(commandedCurrentA);
-
-                static uint32_t lastDampingPrintMs = 0;
-
-                if (millis() - lastDampingPrintMs >= 200)
-                {
-                    lastDampingPrintMs = millis();
-
-                    Serial.printf(
-                        "TRIGGER: target=%+.2f deg "
-                        "pos=%+.2f deg "
-                        "err=%+.2f deg "
-                        "vel=%+.3f rad/s "
-                        "cmd=%+.3f A "
-                        "measured=%+.3f A "
-                        "TX=%s\n",
-                        targetPositionDeg,
-                        feedback.positionDeg,
-                        positionErrorDeg,
-                        feedback.speedRadS,
-                        commandedCurrentA,
-                        feedback.currentA,
-                        ok ? "OK" : "FAILED"
-                    );
-                }
-            }
-        }
-
-        // #endif 
         #ifdef TESTING
-            if (Serial.available()) {}
+            if (Serial.available()) {
 
             const char cmd = static_cast<char>(Serial.read());
             switch (cmd)
@@ -301,10 +448,10 @@ void loop()
 
                     ok &= motor.commandPosition(
                         targetPositionDeg, // degrees
-                        10.0f, // maximum rad/s
+                        10.0f,  // maximum rad/s
                         0.25f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
-                        1,   // Kp
-                        0     // Kd
+                        1,      // Kp
+                        0       // Kd
                     );
 
 
@@ -324,12 +471,11 @@ void loop()
 
                     ok &= motor.commandPosition(
                         targetPositionDeg, // degrees
-                        10.0f, // maximum rad/s
-                        0.20f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
-                        1,   // Kp
-                        0     // Kd
+                        10.0f,   // maximum rad/s
+                        0.20f,   // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
+                        1,       // Kp
+                        0        // Kd
                     );
-
 
                     Serial.println(
                         ok
@@ -497,6 +643,7 @@ void loop()
 
                 default:
                     break;
+                }
             }
             #endif
     #endif
