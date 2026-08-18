@@ -8,8 +8,8 @@ namespace Pins {
   static constexpr uint8_t I2C_SDA = 16;
   static constexpr uint8_t I2C_SCL = 17;
 
-  static constexpr uint8_t CAN_RX = 0;
-  static constexpr uint8_t CAN_TX = 1;
+  // static constexpr uint8_t CAN_RX = 0;
+  // static constexpr uint8_t CAN_TX = 1;
 
   static constexpr uint8_t LED_1 = 19;
   static constexpr uint8_t LED_2 = 20;
@@ -27,4 +27,14 @@ namespace Config {
   static constexpr float GRIPPER_MAX = 1.0f;
 
   static constexpr float MAX_FEEDBACK_TORQUE = 0.4f;
+}
+
+namespace CANID {
+
+constexpr uint16_t WristState = 0x101;
+constexpr uint16_t WristCommand = 0x102;
+
+constexpr uint16_t GripperState = 0x201;
+constexpr uint16_t GripperCommand = 0x202;
+
 }

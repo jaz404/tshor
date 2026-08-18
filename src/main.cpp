@@ -34,6 +34,7 @@ constexpr float TRIGGER_CLOSED_DEG = 30.0f;
 bool dampingEnabled = false;
 bool ppControlEnabled = false;
 uint32_t lastControlCommandUs = 0;
+uint32_t lastDampingCommandUs = 0;
 
 // TODO: Replace/update with analog read 14 and 15
 uint16_t thumbX = 0;
@@ -407,7 +408,7 @@ void loop()
         // =====================================================
         // 3. LOCAL TRIGGER MOTOR CONTROL
         // =====================================================
-        runPPControl();
+        // runPPControl();
 
         #ifdef TESTING
             if (Serial.available()) {
