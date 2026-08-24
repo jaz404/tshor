@@ -7,7 +7,10 @@ namespace
     FlexCAN_T4FD<CAN3, RX_SIZE_256, TX_SIZE_16> canFD;
 
     constexpr uint32_t TRIGGER_STATE_ID = 0x11;   // Trigger -> main/gripper side
-    constexpr uint32_t GRIPPER_STATE_ID = 0x12;   // Main/gripper side -> trigger
+    constexpr uint32_t GRIPPER_STATE_ID = 0x12;   // Main/gripper side -> trigger ????
+    // should be 0x22? The controller listens for dynamic stiffness updates from the PC on CAN ID 0x22.
+    // Byte 0: Stiffness Multiplier (0-255). 0 = moving through empty air (light spring). 255 = motor stalled/crushing (maximum pushback). 
+    // need to update - returns the gripper position!! 
 
     constexpr uint32_t CANFD_SEND_INTERVAL_MS = 10;   // 100 Hz trigger-state broadcast
     constexpr uint32_t GRIPPER_TIMEOUT_MS = 100;
@@ -105,28 +108,6 @@ void MainCanFD::sendTriggerState(
     txMsg.brs = 1;
     txMsg.len = 8;
 
-    // =========================================================
-    // CAN-FD ID 0x11 : TRIGGER STATE
-    // Trigger controller -> main/gripper side
-    //
-    // Byte 0-1 : trigger position, uint16_t, big-endian
-    //              0     = fully open
-    //              10000 = fully closed
-    //
-    // Byte 2-3 : thumb X, uint16_t, big-endian
-    //
-    // Byte 4-5 : thumb Y, uint16_t, big-endian
-    //
-    // Byte 6   : bumperPressed (legacy slot)
-    //            Unused on this trigger -> always 0
-    //
-    // Byte 7   : springForce (legacy slot)
-    //            Unused for now -> always 0
-    //
-    // Keep the original 8-byte message layout so the main-side
-    // decoder does not need to change as the controller evolves.
-    // =========================================================
-
     txMsg.buf[0] = static_cast<uint8_t>((triggerPos >> 8) & 0xFF);
     txMsg.buf[1] = static_cast<uint8_t>(triggerPos & 0xFF);
 
@@ -136,13 +117,41 @@ void MainCanFD::sendTriggerState(
     txMsg.buf[4] = static_cast<uint8_t>((thumbY >> 8) & 0xFF);
     txMsg.buf[5] = static_cast<uint8_t>(thumbY & 0xFF);
 
-    // Preserve original byte positions. These fields are unused for now.
-    txMsg.buf[6] = 0; // bumperPressed
-    txMsg.buf[7] = 0; // springForce
+    txMsg.buf[6] = 0;
+    txMsg.buf[7] = 0;
 
-    canFD.write(txMsg);
+    bool sent = canFD.write(txMsg);
+
+    Serial.print("CAN TX | ID: 0x");
+    Serial.print(txMsg.id, HEX);
+
+    Serial.print(" | sent: ");
+    Serial.print(sent);
+
+    Serial.print(" | trigger: ");
+    Serial.print(triggerPos);
+
+    Serial.print(" | thumbX: ");
+    Serial.print(thumbX);
+
+    Serial.print(" | thumbY: ");
+    Serial.print(thumbY);
+
+    Serial.print(" | data: ");
+
+    for (int i = 0; i < txMsg.len; ++i)
+    {
+        if (txMsg.buf[i] < 0x10)
+        {
+            Serial.print("0");
+        }
+
+        Serial.print(txMsg.buf[i], HEX);
+        Serial.print(" ");
+    }
+
+    Serial.println();
 }
-
 const MainCanFD::GripperState& MainCanFD::getGripperState()
 {
     return gripperState;

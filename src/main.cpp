@@ -36,7 +36,6 @@ bool ppControlEnabled = false;
 uint32_t lastControlCommandUs = 0;
 uint32_t lastDampingCommandUs = 0;
 
-// TODO: Replace/update with analog read 14 and 15
 uint16_t thumbX = 0;
 uint16_t thumbY = 0;
 
@@ -133,7 +132,7 @@ constexpr float PP_KD = 0.0f;
 // Current limit used by OT2206 position mode for the first P-P version.
 // Later this can be changed using gripper force/contact/error to make
 // the trigger feel stiffer when the gripper interacts with an object.
-constexpr float PP_CURRENT_LIMIT_A = 0.25f;
+constexpr float PP_CURRENT_LIMIT_A = 0.50f;
 
 struct PPCommand
 {
@@ -251,46 +250,46 @@ static void runPPControl()
     }
 }
 
-    // Start OT2206 in position/speed/torque mode for bilateral P-P control.
-    static bool startPPPositionControl()
-    {
-        dampingEnabled = false;
-        ppControlEnabled = false;
+    // // Start OT2206 in position/speed/torque mode for bilateral P-P control.
+    // static bool startPPPositionControl()
+    // {
+    //     // dampingEnabled = false;
+    //     ppControlEnabled = false;
 
-        bool ok = motor.stopFree();
-        delay(10);
+    //     bool ok = motor.stopFree();
+    //     delay(10);
 
-        ok &= motor.selectPositionSpeedTorqueMode();
-        delay(10);
+    //     ok &= motor.selectPositionSpeedTorqueMode();
+    //     delay(10);
 
-        // Load a safe initial position command before starting.
-        // Use the current trigger position so enabling P-P does not cause a jump.
-        const float initialPositionDeg =
-            feedback.valid ? feedback.positionDeg : targetPositionDeg;
+    //     // Load a safe initial position command before starting.
+    //     // Use the current trigger position so enabling P-P does not cause a jump.
+    //     const float initialPositionDeg =
+    //         feedback.valid ? feedback.positionDeg : targetPositionDeg;
 
-        ok &= motor.commandPosition(
-            initialPositionDeg,
-            PP_MAX_SPEED_RAD_S,
-            PP_CURRENT_LIMIT_A,
-            PP_KP,
-            PP_KD
-        );
-        delay(10);
+    //     ok &= motor.commandPosition(
+    //         initialPositionDeg,
+    //         PP_MAX_SPEED_RAD_S,
+    //         PP_CURRENT_LIMIT_A,
+    //         PP_KP,
+    //         PP_KD
+    //     );
+    //     delay(10);
 
-        ok &= motor.start();
-        delay(10);
+    //     ok &= motor.start();
+    //     delay(10);
 
-        if (ok)
-        {
-            lastControlCommandUs = micros();
-        }
-        else
-        {
-            motor.stopFree();
-        }
+    //     if (ok)
+    //     {
+    //         lastControlCommandUs = micros();
+    //     }
+    //     else
+    //     {
+    //         motor.stopFree();
+    //     }
 
-        return ok;
-    }
+    //     return ok;
+    // }
 
 void setup() {
 
@@ -329,6 +328,9 @@ void setup() {
         }
 
         Serial.println("DRV2605L Haptics ready.");
+        delay(5000);
+        MainCanFD::begin();
+
 
         #ifdef TESTING
         printMenu();
@@ -393,9 +395,13 @@ void loop()
         // =====================================================
         // 2. MAIN NETWORK -- CAN3 FD
         // =====================================================
-
+        
         // Read latest gripper position (ID 0x12) and update timeout state.
         MainCanFD::update();
+
+        // analog read the joystick each iter
+        thumbX = analogRead(Pins::JOY_X);
+        thumbY = analogRead(Pins::JOY_Y);
 
         // Send trigger position + thumb X/Y to main network (ID 0x11).
         // sendTriggerState() internally limits this to 100 Hz.
@@ -450,9 +456,9 @@ void loop()
                     ok &= motor.commandPosition(
                         targetPositionDeg, // degrees
                         10.0f,  // maximum rad/s
-                        0.25f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
-                        1,      // Kp
-                        0       // Kd
+                        2.00f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
+                        100,      // Kp
+                        5       // Kd
                     );
 
 
