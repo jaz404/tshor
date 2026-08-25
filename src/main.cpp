@@ -3,68 +3,65 @@
 #include "OT2206.h"
 #include "adafruitmotor.h"
 #include "BoardConfig.h"
-#include "MainCanFD.h"
-#include "MainSerial.h" // using serial for now instead of CAN to setup gripper
-
-bool ppMotorStarted = false;
+#include "MainCanFD.h"  
+#include "MainSerial.h" // using serial for now instead of CAN for now!
 
 AdafruitMotor haptic;
-constexpr uint32_t FEEDBACK_POLL_PERIOD_US = 5000; // 200 Hz
+
+// TIMING
+
+constexpr uint32_t CONTROL_PERIOD_US = 500;         // 2kHz local motor-current loop
+
 uint32_t lastFeedbackPollUs = 0;
-    static uint32_t lastPrintMs = 0;
+uint32_t lastControlCommandUs = 0;
+uint32_t lastDampingCommandUs = 0;
 
-// =========================================================
-// TRIGGER CONTROL PARAMETERS
-// =========================================================
+static uint32_t lastPrintMs = 0;
 
-// Existing/local damping controller parameters.
-constexpr float POSITION_GAIN_A_PER_DEG = 0.25f;
-float targetPositionDeg = 0.0f;
+// TRIGGER CONTROL
 
-constexpr uint32_t CONTROL_PERIOD_US = 500; // 1 kHz local motor-current loop
-constexpr float DAMPING_GAIN = 2.00f;
-constexpr float STATIC_RESISTANCE_A = 0.5f;
-constexpr float MAX_DAMPING_CURRENT_A = 1.5f;
-constexpr float VELOCITY_DEADBAND_RAD_S = 0.05f;
+// TODO: these may change over time: ideal fix - recalib everytime on boot
+constexpr float TRIGGER_OPEN_DEG = 359.0f;
+constexpr float TRIGGER_CLOSED_DEG = 0.0f;
+
+uint8_t STIFFNESS_ACTIVATION_THRES = 50;
 
 // P-P controller gain.
 // Input error is normalized (0.0 to 1.0), output is motor current in A.
-constexpr float PP_GAIN_A = 1.0f;
 constexpr float PP_MAX_CURRENT_A = 2.0f;
 
-// TODO: Measure and replace with the actual trigger travel.
-// These limits are used only to convert OT2206 degrees into 0...10000.
-constexpr float TRIGGER_OPEN_DEG = 250.0f;
-constexpr float TRIGGER_CLOSED_DEG = -291.0f;
+// CONTROL STATE
+
+float targetPositionDeg = 0.0f;
 
 bool dampingEnabled = false;
 bool ppControlEnabled = true;
-uint32_t lastControlCommandUs = 0;
-uint32_t lastDampingCommandUs = 0;
+bool ppMotorStarted = false;
+
+
+// Inputs
 
 uint16_t thumbX = 0;
 uint16_t thumbY = 0;
 
-// =========================================================
-// MOTOR NETWORK -- CLASSICAL CAN2
-// =========================================================
+
+// OT2206 motor (connected to CAN1)
 
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can1;
 
 OT2206CAN<decltype(Can1)>::Config motorConfig{
     .motorId = 1,
     .hostId = 100,
-    .pmaxTurns = 1.0f,            // TODO: increase this in motor config if needed
+    .pmaxTurns = 1.0f,            // Do I need to increase this?
     .speedFullScaleRadS = 200.0f,
     .currentFullScaleA = 4.0f
 };
 
 OT2206CAN<decltype(Can1)> motor(Can1, motorConfig);
+
 OT2206CAN<decltype(Can1)>::Feedback feedback;
 
-// =========================================================
 // HELPERS
-// =========================================================
 
 #ifdef TESTING
 static void printMenu() {
@@ -82,6 +79,7 @@ static void printMenu() {
     Serial.println("?: menu");
 }
 #endif
+
 static void printFeedback(const decltype(feedback) &f) {
     if (!f.valid) {
         Serial.println("No valid feedback received yet.");
@@ -100,6 +98,7 @@ static void printFeedback(const decltype(feedback) &f) {
     Serial.println();
 }
 
+#ifndef TESTING
 // Convert local OT2206 trigger angle to a common 0...10000 position.
 static uint16_t getTriggerPositionNormalized()
 {
@@ -177,6 +176,11 @@ static PPCommand calculatePPControl(
 
 static void runPPControl()
 {
+    if (!ppControlEnabled)
+    {
+        return;
+    }
+
     const uint32_t nowUs = micros();
 
     if (nowUs - lastControlCommandUs < CONTROL_PERIOD_US)
@@ -186,47 +190,88 @@ static void runPPControl()
 
     lastControlCommandUs = nowUs;
 
-    const MainSerial::GripperState& gripper =
-        MainSerial::getGripperState();
-
-    if (!gripper.valid)
+    if (!feedback.valid)
     {
+        static bool initialized = false;
+
+        if (!initialized)
+        {
+            bool ok = true;
+
+            ok &= motor.stopFree();
+            delay(5);
+
+            ok &= motor.selectTorqueMode();
+            delay(5);
+
+            initialized = ok;
+        }
+
+        if (initialized)
+        {
+            // This command causes the OT2206 to return feedback.
+            motor.commandTorque(0.0f);
+        }
+
         return;
     }
 
     if (!ppMotorStarted)
-{
-    bool ok = true;
-
-    ok &= motor.selectPositionSpeedTorqueMode();
-    delay(5);
-
-    // Load current trigger position first so it does not jump
-    ok &= motor.commandPosition(
-        feedback.positionDeg,
-        PP_MAX_SPEED_RAD_S,
-        0.2f,
-        PP_KP,
-        PP_KD
-    );
-    delay(5);
-
-    ok &= motor.start();
-    delay(5);
-
-    Serial.printf(
-        "P-P START: %s | initialPos=%.2f\n",
-        ok ? "OK" : "FAIL",
-        feedback.positionDeg
-    );
-
-    if (!ok)
     {
+        bool ok = true;
+
+        ok &= motor.stopFree();
+        delay(5);
+
+        ok &= motor.selectPositionSpeedTorqueMode();
+        delay(5);
+
+        // Start from the actual measured trigger position.
+        ok &= motor.commandPosition(
+            feedback.positionDeg,
+            PP_MAX_SPEED_RAD_S,
+            0.0f,
+            PP_KP,
+            PP_KD
+        );
+
+        delay(5);
+
+        ok &= motor.start();
+        delay(5);
+
+        Serial.printf(
+            "P-P START: %s | initialPos=%.2f\n",
+            ok ? "OK" : "FAIL",
+            feedback.positionDeg
+        );
+
+        if (!ok)
+        {
+            return;
+        }
+
+        ppMotorStarted = true;
+    }
+    const MainSerial::GripperState& gripper =
+        MainSerial::getGripperState();
+
+        // Even if gripper feedback disappears, we MUST still send a
+    // command to OT2206 or its position feedback will stop updating.
+    if (!gripper.valid)
+    {
+        motor.commandPosition(
+            feedback.positionDeg,
+            PP_MAX_SPEED_RAD_S,
+            0.0f,
+            PP_KP,
+            PP_KD
+        );
+
         return;
     }
 
-    ppMotorStarted = true;
-}
+    // P-P CONTROL
 
     const uint16_t triggerPos =
         getTriggerPositionNormalized();
@@ -247,34 +292,56 @@ static void runPPControl()
     const float currentLimit =
         stiffnessNormalized * PP_MAX_CURRENT_A;
 
-    const bool ok = motor.commandPosition(
-        pp.targetPositionDeg,       // reference = actual gripper
-        PP_MAX_SPEED_RAD_S,
-        currentLimit,
-        PP_KP,
-        PP_KD
-    );
+    bool ok;
 
-    static uint32_t lastPrintMs = 0;
-
-    if (millis() - lastPrintMs >= 200)
+    if (gripper.stiffness > STIFFNESS_ACTIVATION_THRES)
     {
-        lastPrintMs = millis();
-
-        Serial.printf(
-            "PP | trigger=%.3f gripper=%.3f "
-            "error=%+.3f | target=%.2f deg "
-            "Ilim=%.3fA Iactual=%.3fA TX=%s\n",
-            pp.triggerPosition,
-            pp.gripperPosition,
-            pp.positionError,
+        ok = motor.commandPosition(
             pp.targetPositionDeg,
+            PP_MAX_SPEED_RAD_S,
             currentLimit,
-            feedback.currentA,
-            ok ? "OK" : "FAIL"
+            PP_KP,
+            PP_KD
         );
     }
+    else
+    {
+        // Still send commandPosition so OT2206 keeps returning
+        // fresh position feedback, but apply zero current.
+        ok = motor.commandPosition(
+            pp.targetPositionDeg,
+            PP_MAX_SPEED_RAD_S,
+            0.0f,
+            PP_KP,
+            PP_KD
+        );
+    }
+
+    // =========================================================
+    // DEBUG
+    // =========================================================
+
+    // static uint32_t lastPrintMs = 0;
+
+    // if (millis() - lastPrintMs >= 200)
+    // {
+    //     lastPrintMs = millis();
+
+    //     Serial.printf(
+    //         "PP | rawDeg=%.2f trigger=%u "
+    //         "gripper=%u stiffness=%u "
+    //         "Ilim=%.3fA Iactual=%.3fA TX=%s\n",
+    //         feedback.positionDeg,
+    //         triggerPos,
+    //         gripper.position,
+    //         gripper.stiffness,
+    //         currentLimit,
+    //         feedback.currentA,
+    //         ok ? "OK" : "FAIL"
+    //     );
+    // }
 }
+#endif
 
 void setup() {
 
@@ -354,11 +421,7 @@ void loop()
         {
             if (motor.parseFeedback(rx, feedback))
             {
-                // Avoid printing every frame during damping mode.
-                if (!dampingEnabled)
-                {
-                    // printFeedback(feedback);
-                }
+                printFeedback(feedback);
             }
             else
             {
@@ -378,45 +441,7 @@ void loop()
             }
         }
 
-        // =====================================================
-        // 2. MAIN NETWORK -- CAN3 FD
-        // =====================================================
         
-        // Read latest gripper position (ID 0x12) and update timeout state.
-        // MainCanFD::update();
-
-        // // analog read the joystick each iter
-        // thumbX = analogRead(Pins::JOY_X);
-        // thumbY = analogRead(Pins::JOY_Y);
-
-        // // Send trigger position + thumb X/Y to main network (ID 0x11).
-        // // sendTriggerState() internally limits this to 100 Hz.
-        // MainCanFD::sendTriggerState(
-        //     getTriggerPositionNormalized(),
-        //     thumbX,
-        //     thumbY
-        // );
-        
-        // Receive:
-        // @G,<stiffness>,<gripperPosition>
-        MainSerial::update();
-
-        // Read joystick
-        thumbX = analogRead(Pins::JOY_X);
-        thumbY = analogRead(Pins::JOY_Y);
-
-        // Send:
-        // @T,<triggerPosition>,<thumbX>,<thumbY>
-        MainSerial::sendTriggerState(
-            getTriggerPositionNormalized(),
-            thumbX,
-            thumbY
-        );
-
-        // =====================================================
-        // 3. LOCAL TRIGGER MOTOR CONTROL
-        // =====================================================
-        runPPControl();
 
         #ifdef TESTING
             if (Serial.available()) {
@@ -654,6 +679,59 @@ void loop()
                     break;
                 }
             }
+            #else
+            // =====================================================
+            // CAN3 FD (Serial for now!)
+            // =====================================================
+            
+            // Read latest gripper position (ID 0x12) and update timeout state.
+            // MainCanFD::update();
+
+            // // analog read the joystick each iter
+            // thumbX = analogRead(Pins::JOY_X);
+            // thumbY = analogRead(Pins::JOY_Y);
+
+            // // Send trigger position + thumb X/Y to main network (ID 0x11).
+            // // sendTriggerState() internally limits this to 100 Hz.
+            // MainCanFD::sendTriggerState(
+            //     getTriggerPositionNormalized(),
+            //     thumbX,
+            //     thumbY
+            // );
+            
+            // Receive:
+            // G,<stiffness>,<gripperPosition>
+            MainSerial::update();
+
+            // Read joystick
+            thumbX = analogRead(Pins::JOY_X);
+            thumbY = analogRead(Pins::JOY_Y);
+            
+
+            static uint32_t lastTriggerDebugMs = 0;
+
+            // if (millis() - lastTriggerDebugMs >= 200)
+            // {
+            //     lastTriggerDebugMs = millis();
+
+            //     Serial.printf(
+            //         "TRIGGER DEBUG | valid=%d rawDeg=%.2f normalized=%u\n",
+            //         feedback.valid,
+            //         feedback.positionDeg,
+            //         getTriggerPositionNormalized()
+            //     );
+            // }
+
+            // Send:
+            // T,<triggerPosition>,<thumbX>,<thumbY>
+            MainSerial::sendTriggerState(
+                getTriggerPositionNormalized(),
+                thumbX,
+                thumbY
+            );
+
+            runPPControl();
+
             #endif
     #endif
 }
