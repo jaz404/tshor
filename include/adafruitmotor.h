@@ -39,9 +39,76 @@ public:
 
         drv.stop();
     }
+    
+    // more modes to try with
+    void vibrateStrong(uint32_t durationMs)
+    {
+        drv.setMode(DRV2605_MODE_REALTIME);
+
+        drv.setRealtimeValue(127);   // strong positive drive
+        delay(durationMs);
+
+        drv.setRealtimeValue(0);
+
+        drv.setMode(DRV2605_MODE_INTTRIG);
+    }
+    void testStrengths()
+    {
+        drv.setMode(DRV2605_MODE_REALTIME);
+
+        const uint8_t strengths[] = {20, 40, 60, 80, 100, 127};
+
+        for (int i = 0; i < 6; i++)
+        {
+            drv.setRealtimeValue(strengths[i]);
+
+            delay(500);
+
+            drv.setRealtimeValue(0);
+            delay(500);
+        }
+
+        drv.setRealtimeValue(0);
+        drv.setMode(DRV2605_MODE_INTTRIG);
+    }
+    // void stop()
+    // {
+    //     drv.stop();
+    // }
+// -------------------------------------------------------
+    // Continuous haptic feedback
+    // -------------------------------------------------------
+
+    void startRealtime()
+    {
+        Serial.println("[DRV] Entering RTP mode");
+
+        drv.setMode(DRV2605_MODE_REALTIME);
+        drv.setRealtimeValue(0);
+    }
+
+
+    void setStrength(uint8_t strength)
+    {
+        strength = constrain(strength, 0, 127);
+
+        drv.setRealtimeValue(strength);
+    }
+
+
+    void stopRealtime()
+    {
+        Serial.println("[DRV] Stopping RTP");
+
+        drv.setRealtimeValue(0);
+
+        drv.setMode(DRV2605_MODE_INTTRIG);
+    }
+
 
     void stop()
     {
+        drv.setRealtimeValue(0);
         drv.stop();
     }
 

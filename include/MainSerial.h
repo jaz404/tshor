@@ -1,27 +1,39 @@
-#pragma once
+#ifndef MAINSERIAL_H
+#define MAINSERIAL_H
 
 #include <Arduino.h>
 
-namespace MainSerial
+
+class MainSerial
 {
+public:
+
     struct GripperState
     {
-        uint8_t stiffness = 0;   // 0-255
-        uint16_t position = 0;   // 0-10000
+        float positionError = 0.0f;
+        float torque = 0.0f;
 
         bool valid = false;
+
         uint32_t lastRxMs = 0;
     };
 
-    void begin();
 
-    void update();
+    static void begin();
 
-    void sendTriggerState(
+    static void update();
+
+
+    static void sendTriggerState(
         uint16_t triggerPos,
         uint16_t thumbX,
         uint16_t thumbY
     );
 
-    const GripperState& getGripperState();
-}
+
+    static const GripperState&
+    getGripperState();
+};
+
+
+#endif

@@ -21,8 +21,8 @@ static uint32_t lastPrintMs = 0;
 // TRIGGER CONTROL
 
 // TODO: these may change over time: ideal fix - recalib everytime on boot
-constexpr float TRIGGER_OPEN_DEG = 359.0f;
-constexpr float TRIGGER_CLOSED_DEG = 0.0f;
+constexpr float TRIGGER_OPEN_DEG = 715.0f;
+constexpr float TRIGGER_CLOSED_DEG = 5.0f;
 
 uint8_t STIFFNESS_ACTIVATION_THRES = 50;
 
@@ -52,7 +52,7 @@ FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can1;
 OT2206CAN<decltype(Can1)>::Config motorConfig{
     .motorId = 1,
     .hostId = 100,
-    .pmaxTurns = 1.0f,            // Do I need to increase this?
+    .pmaxTurns = 2.0f,            // Do I need to increase this?
     .speedFullScaleRadS = 200.0f,
     .currentFullScaleA = 4.0f
 };
@@ -60,6 +60,8 @@ OT2206CAN<decltype(Can1)>::Config motorConfig{
 OT2206CAN<decltype(Can1)> motor(Can1, motorConfig);
 
 OT2206CAN<decltype(Can1)>::Feedback feedback;
+
+constexpr float TRIGGER_REDUCTION = 14.0f;
 
 // HELPERS
 
@@ -137,84 +139,49 @@ constexpr float PP_KD = 0.0f;
 // Current limit used by OT2206 position mode for the first P-P version.
 // Later this can be changed using gripper force/contact/error to make
 // the trigger feel stiffer when the gripper interacts with an object.
-constexpr float PP_CURRENT_LIMIT_A = 0.50f;
 
-struct PPCommand
+static float getHapticMotorCurrent()
 {
-    float triggerPosition = 0.0f;
-    float gripperPosition = 0.0f;
-    float positionError = 0.0f;
-    float targetPositionDeg = 0.0f;
-};
+    const auto& gripper = MainSerial::getGripperState();
 
-static PPCommand calculatePPControl(
-    uint16_t triggerPos,
-    uint16_t gripperPos
-)
-{
-    PPCommand command;
-
-    command.triggerPosition =
-        static_cast<float>(triggerPos) / 10000.0f;
-
-    command.gripperPosition =
-        static_cast<float>(gripperPos) / 10000.0f;
-
-    // reference - measured
-    command.positionError =
-        command.gripperPosition -
-        command.triggerPosition;
-
-    // Actual gripper position becomes trigger reference.
-    command.targetPositionDeg =
-        TRIGGER_OPEN_DEG +
-        command.gripperPosition *
-        (TRIGGER_CLOSED_DEG - TRIGGER_OPEN_DEG);
-
-    return command;
-}
-
-static void runPPControl()
-{
-    if (!ppControlEnabled)
+    if (!gripper.valid)
     {
-        return;
+        return 0.0f;
     }
 
+    // A / gripper revolution
+    constexpr float KP = 100.0f;
+
+    constexpr float MAX_CURRENT_A = 4.0f;
+
+    // Flip this if the trigger pushes in the wrong direction.
+    constexpr float HAPTIC_SIGN = 1.0f;
+
+    float current =
+        HAPTIC_SIGN *
+        KP *
+        gripper.positionError;
+
+    return constrain(
+        current,
+        -MAX_CURRENT_A,
+        MAX_CURRENT_A
+    );
+}
+static void runMotor()
+{
     const uint32_t nowUs = micros();
 
-    if (nowUs - lastControlCommandUs < CONTROL_PERIOD_US)
+    if (
+        nowUs - lastControlCommandUs <
+        CONTROL_PERIOD_US
+    )
     {
         return;
     }
 
     lastControlCommandUs = nowUs;
 
-    if (!feedback.valid)
-    {
-        static bool initialized = false;
-
-        if (!initialized)
-        {
-            bool ok = true;
-
-            ok &= motor.stopFree();
-            delay(5);
-
-            ok &= motor.selectTorqueMode();
-            delay(5);
-
-            initialized = ok;
-        }
-
-        if (initialized)
-        {
-            // This command causes the OT2206 to return feedback.
-            motor.commandTorque(0.0f);
-        }
-
-        return;
-    }
 
     if (!ppMotorStarted)
     {
@@ -223,28 +190,15 @@ static void runPPControl()
         ok &= motor.stopFree();
         delay(5);
 
-        ok &= motor.selectPositionSpeedTorqueMode();
+        ok &= motor.selectTorqueMode();
         delay(5);
 
-        // Start from the actual measured trigger position.
-        ok &= motor.commandPosition(
-            feedback.positionDeg,
-            PP_MAX_SPEED_RAD_S,
-            0.0f,
-            PP_KP,
-            PP_KD
-        );
-
+        // Initial zero-current command
+        // also gets feedback flowing.
+        ok &= motor.commandTorque(0.0f);
         delay(5);
 
         ok &= motor.start();
-        delay(5);
-
-        Serial.printf(
-            "P-P START: %s | initialPos=%.2f\n",
-            ok ? "OK" : "FAIL",
-            feedback.positionDeg
-        );
 
         if (!ok)
         {
@@ -252,94 +206,34 @@ static void runPPControl()
         }
 
         ppMotorStarted = true;
-    }
-    const MainSerial::GripperState& gripper =
-        MainSerial::getGripperState();
-
-        // Even if gripper feedback disappears, we MUST still send a
-    // command to OT2206 or its position feedback will stop updating.
-    if (!gripper.valid)
-    {
-        motor.commandPosition(
-            feedback.positionDeg,
-            PP_MAX_SPEED_RAD_S,
-            0.0f,
-            PP_KP,
-            PP_KD
-        );
-
         return;
     }
 
-    // P-P CONTROL
-
-    const uint16_t triggerPos =
-        getTriggerPositionNormalized();
-
-    const PPCommand pp =
-        calculatePPControl(
-            triggerPos,
-            gripper.position
-        );
-
-    const float stiffnessNormalized =
-        constrain(
-            static_cast<float>(gripper.stiffness) / 255.0f,
-            0.0f,
-            1.0f
-        );
-
-    const float currentLimit =
-        stiffnessNormalized * PP_MAX_CURRENT_A;
-
-    bool ok;
-
-    if (gripper.stiffness > STIFFNESS_ACTIVATION_THRES)
+    if (!feedback.valid)
     {
-        ok = motor.commandPosition(
-            pp.targetPositionDeg,
-            PP_MAX_SPEED_RAD_S,
-            currentLimit,
-            PP_KP,
-            PP_KD
-        );
+        motor.commandTorque(0.0f);
+        return;
     }
-    else
+
+    float hapticCurrentA =
+        getHapticMotorCurrent();
+
+        static uint32_t lastPrintMs = 0;
+
+    if (millis() - lastPrintMs >= 100)
     {
-        // Still send commandPosition so OT2206 keeps returning
-        // fresh position feedback, but apply zero current.
-        ok = motor.commandPosition(
-            pp.targetPositionDeg,
-            PP_MAX_SPEED_RAD_S,
-            0.0f,
-            PP_KP,
-            PP_KD
+        lastPrintMs = millis();
+
+        SerialUSB1.printf(
+            "hapticCurrentA = %.3f A\n",
+            hapticCurrentA
         );
     }
 
-    // =========================================================
-    // DEBUG
-    // =========================================================
-
-    // static uint32_t lastPrintMs = 0;
-
-    // if (millis() - lastPrintMs >= 200)
-    // {
-    //     lastPrintMs = millis();
-
-    //     Serial.printf(
-    //         "PP | rawDeg=%.2f trigger=%u "
-    //         "gripper=%u stiffness=%u "
-    //         "Ilim=%.3fA Iactual=%.3fA TX=%s\n",
-    //         feedback.positionDeg,
-    //         triggerPos,
-    //         gripper.position,
-    //         gripper.stiffness,
-    //         currentLimit,
-    //         feedback.currentA,
-    //         ok ? "OK" : "FAIL"
-    //     );
-    // }
+    // apply opposing torque 
+    motor.commandTorque(
+        hapticCurrentA
+    );
 }
 #endif
 
@@ -388,7 +282,13 @@ void setup() {
         #ifdef TESTING
         printMenu();
         #endif
-    
+
+        // SerialUSB1.begin(115200);
+
+        // delay(500);
+
+        // SerialUSB1.println("Debug serial ready");
+
     #endif
 }
 void loop()
@@ -420,8 +320,11 @@ void loop()
         while (Can1.read(rx))
         {
             if (motor.parseFeedback(rx, feedback))
-            {
+            {   
+                #ifdef TESTING
                 printFeedback(feedback);
+                #endif
+
             }
             else
             {
@@ -441,8 +344,7 @@ void loop()
             }
         }
 
-        
-
+    
         #ifdef TESTING
             if (Serial.available()) {
 
@@ -482,9 +384,9 @@ void loop()
 
                     ok &= motor.commandPosition(
                         targetPositionDeg, // degrees
-                        10.0f,  // maximum rad/s
-                        2.00f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
-                        100,      // Kp
+                        25.0f,  // maximum rad/s
+                        4.00f,  // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
+                        50,      // Kp
                         5       // Kd
                     );
 
@@ -506,7 +408,7 @@ void loop()
                     ok &= motor.commandPosition(
                         targetPositionDeg, // degrees
                         10.0f,   // maximum rad/s
-                        0.20f,   // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
+                        1.00f,   // maximum current A -- this is directly changing the feel of the motor 0.25 feels much lighter
                         1,       // Kp
                         0        // Kd
                     );
@@ -546,7 +448,7 @@ void loop()
                     bool ok = motor.selectTorqueMode();
                     delay(5);
 
-                    ok &= motor.commandTorque(1.00f);
+                    ok &= motor.commandTorque(4.00f);
 
                     Serial.println(
                         ok
@@ -606,7 +508,20 @@ void loop()
                             : "Start blocked: send a setpoint first or CAN write failed."
                     );
                     break;
+                case 'v':
+                    Serial.println("haptic motor test");
+                    
+                    // haptic.vibrateStrong(1000); // also good
+                    // haptic.playEffect(118, 250); // very good (strongest)
+                    // haptic.playEffect(38,200);
+                    // haptic.playEffect(47, 1000); decent feel
+                        
+                    //  haptic.playEffect(70, 1000);
+                haptic.testStrengths();
 
+                break;
+
+                    
                 case 'x':
                     dampingEnabled = false;
 
@@ -619,6 +534,7 @@ void loop()
                             ? "Damping disabled; stop/free sent."
                             : "CAN write failed."
                     );
+                    targetPositionDeg = feedback.positionDeg;
                     break;
 
                 case 'z':
@@ -704,8 +620,8 @@ void loop()
             MainSerial::update();
 
             // Read joystick
-            thumbX = analogRead(Pins::JOY_X);
-            thumbY = analogRead(Pins::JOY_Y);
+            // thumbX = analogRead(Pins::JOY_X);
+            // thumbY = analogRead(Pins::JOY_Y);
             
 
             static uint32_t lastTriggerDebugMs = 0;
@@ -730,7 +646,8 @@ void loop()
                 thumbY
             );
 
-            runPPControl();
+            // runPPControl();
+            runMotor();
 
             #endif
     #endif
