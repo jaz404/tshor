@@ -150,7 +150,7 @@ static float getHapticMotorCurrent()
     }
 
     // A / gripper revolution
-    constexpr float KP = 100.0f;
+    constexpr float KP = 5.0f;
 
     constexpr float MAX_CURRENT_A = 4.0f;
 
@@ -181,31 +181,49 @@ static void runMotor()
     }
 
     lastControlCommandUs = nowUs;
-
-
     if (!ppMotorStarted)
     {
-        bool ok = true;
+        using MotorType = OT2206CAN<decltype(Can1)>;
 
-        ok &= motor.stopFree();
-        delay(5);
+        // 1.0 = preset gain.
+        constexpr float CURRENT_KP_MULT = 1.4f;
+        constexpr float CURRENT_KI_MULT = 1.15f;
 
-        ok &= motor.selectTorqueMode();
-        delay(5);
-
-        // Initial zero-current command
-        // also gets feedback flowing.
-        ok &= motor.commandTorque(0.0f);
-        delay(5);
-
-        ok &= motor.start();
-
-        if (!ok)
-        {
+        if (!motor.stopFree())
             return;
-        }
+        delay(5);
+
+        if (!motor.setPIMultiplier(
+                MotorType::PIParameter::CurrentKp,
+                CURRENT_KP_MULT))
+            return;
+        delay(5);
+
+        if (!motor.setPIMultiplier(
+                MotorType::PIParameter::CurrentKi,
+                CURRENT_KI_MULT))
+            return;
+        delay(5);
+
+        if (!motor.selectTorqueMode())
+            return;
+        delay(5);
+
+        if (!motor.commandTorque(0.0f))
+            return;
+        delay(5);
+
+        if (!motor.start())
+            return;
 
         ppMotorStarted = true;
+
+        SerialUSB1.printf(
+            "Motor started. PI multipliers sent: Kp=%.2f Ki=%.2f\n",
+            CURRENT_KP_MULT,
+            CURRENT_KI_MULT
+        );
+
         return;
     }
 
@@ -444,7 +462,10 @@ void loop()
                 case 't':
                 {
                     dampingEnabled = false;
-
+                    // motor.setPIMultiplier(
+                    //     decltype(motor)::PIParameter::CurrentKp,
+                    //     2.0f
+                    // );
                     bool ok = motor.selectTorqueMode();
                     delay(5);
 
@@ -555,24 +576,24 @@ void loop()
 
                     bool ok = true;
 
-                    ok &= motor.setPIMultiplier(
-                        decltype(motor)::PIParameter::SpeedKp,
-                        1.0f
-                    );
+                    // ok &= motor.setPIMultiplier(
+                    //     decltype(motor)::PIParameter::SpeedKp,
+                    //     1.0f
+                    // );
 
-                    ok &= motor.setPIMultiplier(
-                        decltype(motor)::PIParameter::SpeedKi,
-                        1.0f
-                    );
+                    // ok &= motor.setPIMultiplier(
+                    //     decltype(motor)::PIParameter::SpeedKi,
+                    //     1.0f
+                    // );
 
                     ok &= motor.setPIMultiplier(
                         decltype(motor)::PIParameter::CurrentKp,
-                        1.0f
+                        1.4f
                     );
 
                     ok &= motor.setPIMultiplier(
                         decltype(motor)::PIParameter::CurrentKi,
-                        1.0f
+                        1.15f
                     );
 
                     Serial.println(
