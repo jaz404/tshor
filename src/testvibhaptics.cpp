@@ -3,8 +3,6 @@
 
 AdafruitMotor motor;
 
-
-
 const float TORQUE_DEADBAND = 0.05f;
 const float TORQUE_MAX      = 0.30f;
 

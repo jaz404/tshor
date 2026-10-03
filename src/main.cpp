@@ -38,12 +38,10 @@ bool dampingEnabled = false;
 bool ppControlEnabled = true;
 bool ppMotorStarted = false;
 
-
 // Inputs
 
 uint16_t thumbX = 0;
 uint16_t thumbY = 0;
-
 
 // OT2206 motor (connected to CAN1)
 
@@ -144,24 +142,61 @@ static float getHapticMotorCurrent()
 {
     const auto& gripper = MainSerial::getGripperState();
 
-    if (!gripper.valid)
+    constexpr float KP = 10.0f;   // A / revolution
+    constexpr float KD = 0.2f;  // A / (revolution/s)
+
+    constexpr float MAX_CURRENT_A = 4.0f;
+    constexpr float HAPTIC_SIGN = 1.0f;
+
+    constexpr float TAU = 0.010f;       // Derivative filter: 10 ms
+    constexpr uint32_t TIMEOUT_MS = 100; // Stale data: zero current
+
+    static bool initialized = false;
+    static float lastError = 0.0f;
+    static float errorRate = 0.0f;
+    static uint32_t lastSampleMs = 0;
+
+    const float error = gripper.positionError;
+    const uint32_t sampleMs = gripper.lastRxMs;
+
+    if (!gripper.valid || !isfinite(error) ||
+        uint32_t(millis() - sampleMs) > TIMEOUT_MS)
     {
+        initialized = false;
+        errorRate = 0.0f;
         return 0.0f;
     }
 
-    // A / gripper revolution
-    constexpr float KP = 5.0f;
+    // Initialize or restart after a communication gap.
+    if (!initialized ||
+        uint32_t(sampleMs - lastSampleMs) > TIMEOUT_MS)
+    {
+        lastError = error;
+        lastSampleMs = sampleMs;
+        errorRate = 0.0f;
+        initialized = true;
+    }
+    else if (sampleMs != lastSampleMs)
+    {
+        // Calculate D only when a new sample arrives.
+        const float dt =
+            uint32_t(sampleMs - lastSampleMs) * 0.001f;
 
-    constexpr float MAX_CURRENT_A = 4.0f;
+        const float derivative = (error - lastError) / dt;
 
-    // Flip this if the trigger pushes in the wrong direction.
-    constexpr float HAPTIC_SIGN = 1.0f;
+        errorRate +=
+            (dt / (TAU + dt)) * (derivative - errorRate);
 
-    float current =
-        HAPTIC_SIGN *
-        KP *
-        gripper.positionError;
+        lastError = error;
+        lastSampleMs = sampleMs;
+    }
 
+    const float current =
+        HAPTIC_SIGN * (KP * error + KD * errorRate);
+
+    SerialUSB1.printf(
+        "kd = %.3f\n",KD * errorRate 
+    );
     return constrain(
         current,
         -MAX_CURRENT_A,
@@ -186,7 +221,7 @@ static void runMotor()
         using MotorType = OT2206CAN<decltype(Can1)>;
 
         // 1.0 = preset gain.
-        constexpr float CURRENT_KP_MULT = 1.4f;
+        constexpr float CURRENT_KP_MULT = 1.45f;
         constexpr float CURRENT_KI_MULT = 1.15f;
 
         if (!motor.stopFree())
@@ -238,20 +273,23 @@ static void runMotor()
 
         static uint32_t lastPrintMs = 0;
 
-    if (millis() - lastPrintMs >= 100)
-    {
-        lastPrintMs = millis();
+    // if (millis() - lastPrintMs >= 100)
+    // {
+    //     lastPrintMs = millis();
 
-        SerialUSB1.printf(
-            "hapticCurrentA = %.3f A\n",
-            hapticCurrentA
-        );
-    }
+    //     SerialUSB1.printf(
+    //         "hapticCurrentA = %.3f A\n",
+    //         hapticCurrentA
+    //     );
+    // }
 
     // apply opposing torque 
     motor.commandTorque(
         hapticCurrentA
     );
+    // motor.commandTorque(
+    //     0
+    // );
 }
 #endif
 
