@@ -134,22 +134,21 @@ constexpr float PP_MAX_SPEED_RAD_S = 5.0f;
 constexpr float PP_KP = 0.0f;
 constexpr float PP_KD = 0.0f;
 
-// Current limit used by OT2206 position mode for the first P-P version.
-// Later this can be changed using gripper force/contact/error to make
-// the trigger feel stiffer when the gripper interacts with an object.
-
 static float getHapticMotorCurrent()
 {
     const auto& gripper = MainSerial::getGripperState();
 
-    constexpr float KP = 10.0f;   // A / revolution
-    constexpr float KD = 0.2f;  // A / (revolution/s)
+    constexpr float KP = 7.0f;   // A / revolution
+    constexpr float KD = 0.2f;    // A / (revolution/s)
+
+    constexpr float KTAU = 4.0f;  // A / Nm
 
     constexpr float MAX_CURRENT_A = 4.0f;
     constexpr float HAPTIC_SIGN = 1.0f;
+    constexpr float TORQUE_SIGN = 1.0f;
 
-    constexpr float TAU = 0.010f;       // Derivative filter: 10 ms
-    constexpr uint32_t TIMEOUT_MS = 100; // Stale data: zero current
+    constexpr float TAU = 0.010f;
+    constexpr uint32_t TIMEOUT_MS = 100;
 
     static bool initialized = false;
     static float lastError = 0.0f;
@@ -157,9 +156,13 @@ static float getHapticMotorCurrent()
     static uint32_t lastSampleMs = 0;
 
     const float error = gripper.positionError;
+    const float externalTorque = gripper.torque;
+
     const uint32_t sampleMs = gripper.lastRxMs;
 
-    if (!gripper.valid || !isfinite(error) ||
+    if (!gripper.valid ||
+        !isfinite(error) ||
+        !isfinite(externalTorque) ||
         uint32_t(millis() - sampleMs) > TIMEOUT_MS)
     {
         initialized = false;
@@ -167,7 +170,6 @@ static float getHapticMotorCurrent()
         return 0.0f;
     }
 
-    // Initialize or restart after a communication gap.
     if (!initialized ||
         uint32_t(sampleMs - lastSampleMs) > TIMEOUT_MS)
     {
@@ -178,11 +180,11 @@ static float getHapticMotorCurrent()
     }
     else if (sampleMs != lastSampleMs)
     {
-        // Calculate D only when a new sample arrives.
         const float dt =
             uint32_t(sampleMs - lastSampleMs) * 0.001f;
 
-        const float derivative = (error - lastError) / dt;
+        const float derivative =
+            (error - lastError) / dt;
 
         errorRate +=
             (dt / (TAU + dt)) * (derivative - errorRate);
@@ -191,18 +193,33 @@ static float getHapticMotorCurrent()
         lastSampleMs = sampleMs;
     }
 
-    const float current =
-        HAPTIC_SIGN * (KP * error + KD * errorRate);
+    // Existing PD feedback
+    const float pdCurrent =
+        HAPTIC_SIGN *
+        (KP * error + KD * errorRate);
 
-    SerialUSB1.printf(
-        "kd = %.3f\n",KD * errorRate 
+    // Separate proportional torque feedback
+    const float torqueCurrent =
+        TORQUE_SIGN *
+        KTAU *
+        externalTorque;
+
+    const float current =
+        pdCurrent + torqueCurrent;
+
+    SerialUSB1.printf("pdCurrent = %.3f A, torqueCurrent = %.3f A, totalCurrent = %.3f A\n",
+        pdCurrent,
+        torqueCurrent,
+        current
     );
+
     return constrain(
         current,
         -MAX_CURRENT_A,
         MAX_CURRENT_A
     );
 }
+
 static void runMotor()
 {
     const uint32_t nowUs = micros();
