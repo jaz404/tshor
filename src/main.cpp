@@ -6,7 +6,7 @@
 #include "MainCanFD.h"  
 #include "MainSerial.h" // using serial for now instead of CAN for now!
 
-AdafruitMotor haptic;
+AdafruitMotor DRV2605_motor;
 
 // TIMING
 
@@ -16,11 +16,9 @@ uint32_t lastFeedbackPollUs = 0;
 uint32_t lastControlCommandUs = 0;
 uint32_t lastDampingCommandUs = 0;
 
-static uint32_t lastPrintMs = 0;
-
 // TRIGGER CONTROL
 
-// TODO: these may change over time: ideal fix - recalib everytime on boot
+// TODO: these may change over time: ideal fix - recalib everytime on boot? or perhaps add a button
 constexpr float TRIGGER_OPEN_DEG = 715.0f;
 constexpr float TRIGGER_CLOSED_DEG = 5.0f;
 
@@ -43,6 +41,8 @@ bool ppMotorStarted = false;
 uint16_t thumbX = 0;
 uint16_t thumbY = 0;
 
+// additional button to be added ... 
+
 // OT2206 motor (connected to CAN1)
 
 FlexCAN_T4<CAN2, RX_SIZE_256, TX_SIZE_16> Can1;
@@ -58,8 +58,6 @@ OT2206CAN<decltype(Can1)>::Config motorConfig{
 OT2206CAN<decltype(Can1)> motor(Can1, motorConfig);
 
 OT2206CAN<decltype(Can1)>::Feedback feedback;
-
-constexpr float TRIGGER_REDUCTION = 14.0f;
 
 // HELPERS
 
@@ -304,6 +302,7 @@ static void runMotor()
     motor.commandTorque(
         hapticCurrentA
     );
+    
     // motor.commandTorque(
     //     0
     // );
@@ -338,19 +337,22 @@ void setup() {
         delay(100);
         Serial.println("OT2206 CAN initialized at 1 Mbit/s.");
 
-        if (!haptic.begin())
-        {
-            Serial.println("DRV2605L not detected.");
-            while (true)
+        #ifdef DRV2605 
+
+            if (!DRV2605_motor.begin())
             {
-                delay(100);
+                Serial.println("DRV2605L not detected.");
+                while (true)
+                {
+                    delay(100);
+                }
             }
-        }
 
-        Serial.println("DRV2605L Haptics ready.");
-        // delay(5000);
-        // MainCanFD::begin();
+            SerialUSB1.println("DRV2605L Haptics ready.");
+            SerialUSB1.println("Sending test haptic effect...");
+            DRV2605_motor.playEffect(9,100); // sending test effect (soft bump - 30%)
 
+        #endif
 
         #ifdef TESTING
         printMenu();
@@ -362,11 +364,14 @@ void setup() {
 
         // SerialUSB1.println("Debug serial ready");
 
+        // delay(5000);
+        // MainCanFD::begin();
+
     #endif
 }
 void loop()
 {
-    #if CONFIG
+    #ifdef CONFIG
         while (Serial.available())
         {
         char c = Serial.read();
