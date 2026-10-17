@@ -97,6 +97,7 @@ static void printFeedback(const decltype(feedback) &f) {
 }
 
 #ifndef TESTING
+
 // Convert local OT2206 trigger angle to a common 0...10000 position.
 static uint16_t getTriggerPositionNormalized()
 {
@@ -128,9 +129,6 @@ static uint16_t getTriggerPositionNormalized()
 // The gripper position received over CAN-FD becomes the desired
 // trigger position. The current argument limits how strongly the
 // trigger motor is allowed to pull toward that position.
-constexpr float PP_MAX_SPEED_RAD_S = 5.0f;
-constexpr float PP_KP = 0.0f;
-constexpr float PP_KD = 0.0f;
 
 static float getHapticMotorCurrent()
 {
@@ -139,7 +137,7 @@ static float getHapticMotorCurrent()
     constexpr float KP = 7.0f;   // A / revolution
     constexpr float KD = 0.2f;    // A / (revolution/s)
 
-    constexpr float KTAU = 4.0f;  // A / Nm
+    constexpr float KTAU = 7.0f;  // A / Nm
 
     constexpr float MAX_CURRENT_A = 4.0f;
     constexpr float HAPTIC_SIGN = 1.0f;
@@ -220,6 +218,9 @@ static float getHapticMotorCurrent()
 
 static void runMotor()
 {
+
+    // updateVibrationFeedback();
+
     const uint32_t nowUs = micros();
 
     if (
@@ -288,15 +289,15 @@ static void runMotor()
 
         static uint32_t lastPrintMs = 0;
 
-    // if (millis() - lastPrintMs >= 100)
-    // {
-    //     lastPrintMs = millis();
+    if (millis() - lastPrintMs >= 100)
+    {
+        lastPrintMs = millis();
 
-    //     SerialUSB1.printf(
-    //         "hapticCurrentA = %.3f A\n",
-    //         hapticCurrentA
-    //     );
-    // }
+        SerialUSB1.printf(
+            "hapticCurrentA = %.3f A\n",
+            hapticCurrentA
+        );
+    }
 
     // apply opposing torque 
     motor.commandTorque(
@@ -307,6 +308,7 @@ static void runMotor()
     //     0
     // );
 }
+
 #endif
 
 void setup() {
@@ -350,7 +352,7 @@ void setup() {
 
             SerialUSB1.println("DRV2605L Haptics ready.");
             SerialUSB1.println("Sending test haptic effect...");
-            DRV2605_motor.playEffect(9,100); // sending test effect (soft bump - 30%)
+            // DRV2605_motor.playEffect(9,100); // sending test effect (soft bump - 30%)
 
         #endif
 
@@ -366,6 +368,47 @@ void setup() {
 
         // delay(5000);
         // MainCanFD::begin();
+
+
+            // SerialUSB1.println("\n=== Haptic Waveform Tests ===");
+
+            // delay(1000);
+
+            // SerialUSB1.println("[1] Soft contact");
+            // DRV2605_motor.softContact(65);
+            // delay(1200);
+
+            // SerialUSB1.println("[2] Hard contact");
+            // DRV2605_motor.hardContact(65);
+            // delay(1200);
+
+            // SerialUSB1.println("[3] Single bump - 25 ms");
+            // DRV2605_motor.bump(90, 25);
+            // delay(1200);
+
+            // SerialUSB1.println("[4] Repeated bumps - 2 Hz");
+            // DRV2605_motor.repeatedBumps(2.0f, 90, 2000);
+            // delay(1000);
+
+            // SerialUSB1.println("[5] Repeated bumps - 5 Hz");
+            // DRV2605_motor.repeatedBumps(5.0f, 90, 2000);
+            // delay(1000);
+
+            // SerialUSB1.println("[6] Repeated bumps - 10 Hz");
+            // DRV2605_motor.repeatedBumps(10.0f, 90, 2000);
+            // delay(1000);
+
+            // SerialUSB1.println("[7] Repeated bumps - 15 Hz");
+            // DRV2605_motor.repeatedBumps(15.0f, 90, 2000);
+            // delay(1000);
+
+            // SerialUSB1.println("[8] Repeated bumps - 20 Hz");
+            // DRV2605_motor.repeatedBumps(20.0f, 90, 2000);
+            // delay(1000);
+
+            // DRV2605_motor.stopRealtime();
+
+            // SerialUSB1.println("=== Haptic Tests Complete ===");
 
     #endif
 }
@@ -598,7 +641,7 @@ void loop()
                     // haptic.playEffect(47, 1000); decent feel
                         
                     //  haptic.playEffect(70, 1000);
-                haptic.testStrengths();
+                // haptic.testStrengths();
 
                 break;
 
@@ -727,8 +770,16 @@ void loop()
                 thumbY
             );
 
-            // runPPControl();
             runMotor();
+
+            const auto& gripper = MainSerial::getGripperState();
+            
+            DRV2605_motor.updateContactFeedback(
+                gripper.torque,
+                gripper.positionError,
+                gripper.lastRxMs,
+                gripper.valid
+            );
 
             #endif
     #endif
