@@ -5,6 +5,7 @@
 #include "BoardConfig.h"
 #include "MainCanFD.h"  
 #include "MainSerial.h" // using serial for now instead of CAN for now!
+#include <Bounce2.h>
 
 AdafruitMotor DRV2605_motor;
 
@@ -41,7 +42,9 @@ bool ppMotorStarted = false;
 uint16_t thumbX = 0;
 uint16_t thumbY = 0;
 
-// additional button to be added ... 
+// zero btn for the trigger reset
+Bounce zeroBtn;
+constexpr uint8_t zeroBtnPin = 24;
 
 // OT2206 motor (connected to CAN1)
 
@@ -303,7 +306,6 @@ static void runMotor()
     motor.commandTorque(
         hapticCurrentA
     );
-    
     // motor.commandTorque(
     //     0
     // );
@@ -355,6 +357,9 @@ void setup() {
             // DRV2605_motor.playEffect(9,100); // sending test effect (soft bump - 30%)
 
         #endif
+
+        zeroBtn.attach(zeroBtnPin, INPUT_PULLUP);
+        zeroBtn.interval(20); // 20 ms
 
         #ifdef TESTING
         printMenu();
@@ -468,6 +473,15 @@ void loop()
     
         #ifdef TESTING
             if (Serial.available()) {
+
+            zeroBtn.update();
+
+            if (zeroBtn.fell()) {
+                Serial.println(
+                    motor.setTemporaryMechanicalZero()
+                        ? "Temporary zero sent."
+                        : "CAN write failed.");
+            }
 
             const char cmd = static_cast<char>(Serial.read());
             switch (cmd)
@@ -643,6 +657,8 @@ void loop()
                     //  haptic.playEffect(70, 1000);
                 // haptic.testStrengths();
 
+                
+
                 break;
 
                     
@@ -744,9 +760,8 @@ void loop()
             MainSerial::update();
 
             // Read joystick
-            // thumbX = analogRead(Pins::JOY_X);
-            // thumbY = analogRead(Pins::JOY_Y);
-            
+            thumbX = analogRead(Pins::JOY_X);
+            thumbY = analogRead(Pins::JOY_Y);
 
             static uint32_t lastTriggerDebugMs = 0;
 
@@ -761,6 +776,16 @@ void loop()
             //         getTriggerPositionNormalized()
             //     );
             // }
+            
+            // before sending trigger state, check for zero
+            zeroBtn.update();
+
+            if (zeroBtn.fell()) {
+                SerialUSB1.println(
+                    motor.setTemporaryMechanicalZero()
+                        ? "Temporary zero sent."
+                        : "CAN write failed.");
+            }
 
             // Send:
             // T,<triggerPosition>,<thumbX>,<thumbY>
